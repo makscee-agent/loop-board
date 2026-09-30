@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# bin/init REPO     create the board: a private tasks repo (if missing), a GitHub Project over it with
+#                   Status Planned/Ready/Working/Needs me/Done and Executor Agent/Me, and ./board.env
+set -euo pipefail
+cd "$(dirname "$0")/.."
+repo=${1:?usage: bin/init <tasks repo name, e.g. my-board>}
+me=$(gh api user --jq .login)
+case $repo in */*) ;; *) repo=$me/$repo ;; esac
+owner=${repo%%/*}
+gh repo view "$repo" >/dev/null 2>&1 || gh repo create "$repo" --private --add-readme >/dev/null
+n=$(gh project create --owner "$owner" --title "${repo#*/}" --format json --jq .number)
+gh project link "$n" --owner "$owner" --repo "$repo" >/dev/null
+gh project field-create "$n" --owner "$owner" --name Executor --data-type SINGLE_SELECT \
+  --single-select-options Agent,Me >/dev/null
+status=$(gh project field-list "$n" --owner "$owner" --format json --jq '.fields[] | select(.name=="Status").id')
+gh api graphql -f f="$status" -f query='mutation($f:ID!){updateProjectV2Field(input:{fieldId:$f, singleSelectOptions:[
+  {name:"Planned",color:GRAY,description:""}, {name:"Ready",color:BLUE,description:""},
+  {name:"Working",color:YELLOW,description:""}, {name:"Needs me",color:RED,description:""},
+  {name:"Done",color:GREEN,description:""}]}){projectV2Field{... on ProjectV2SingleSelectField{name}}}}' >/dev/null
+printf 'OWNER=%s\nPROJECT=%s\nREPO=%s\n' "$owner" "$n" "$repo" >board.env
+[ -f AGENTS.md ] || cp AGENTS.example.md AGENTS.md
+echo "board: https://github.com/users/$owner/projects/$n (switch the view to Board, grouped by Status)"
+echo "tasks: https://github.com/$repo/issues"

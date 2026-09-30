@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# bin/board add "Title" "Body" [--ready] [--me]   a task (default: Planned, for the agent)
+# bin/board list [STATUS]                         open cards: number, status, executor, title
+# bin/board move N STATUS                         Planned | Ready | Working | Needs me | Done
+# bin/board watch                                 what waits on you (Needs me)
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$ROOT/board.env" 2>/dev/null || { echo "no board.env: run bin/init first" >&2; exit 1; }
+
+items() { gh project item-list "$PROJECT" --owner "$OWNER" --format json --limit 500 \
+  --jq '.items[] | select(.content.number != null) | [.id, (.content.number|tostring), (.status // ""), (.executor // ""), .content.title] | @tsv'; }
+fields() { # cache the field and option ids
+  f=$ROOT/.fields.json
+  [ -s "$f" ] || gh project field-list "$PROJECT" --owner "$OWNER" --format json >"$f"
+  cat "$f"; }
+pid() { [ -s "$ROOT/.project-id" ] || gh project view "$PROJECT" --owner "$OWNER" --format json --jq .id >"$ROOT/.project-id"; cat "$ROOT/.project-id"; }
+set_field() { # ITEM FIELD OPTION
+  local ids; ids=$(fields | jq -r --arg f "$2" --arg o "$3" '.fields[] | select(.name==$f) | .id + " " + ((.options // [])[] | select(.name==$o) | .id)')
+  [ -n "$ids" ] || { echo "no option '$3' in field $2" >&2; exit 1; }
+  gh project item-edit --id "$1" --project-id "$(pid)" --field-id "${ids% *}" --single-select-option-id "${ids#* }" >/dev/null; }
+item_of() { items | awk -F'\t' -v n="$1" '$2==n {print $1}'; }
+
+case ${1:-} in
+  add)
+    title=${2:?title}; body=${3:-}; status=Planned; exec=Agent; shift 2; [ $# -gt 0 ] && shift
+    for a in "$@"; do case $a in --ready) status=Ready ;; --me) exec=Me ;; esac; done
+    url=$(gh issue create -R "$REPO" --title "$title" --body "$body")
+    id=$(gh project item-add "$PROJECT" --owner "$OWNER" --url "$url" --format json --jq .id)
+    set_field "$id" Status "$status"; set_field "$id" Executor "$exec"
+    echo "$url  ($status, $exec)" ;;
+  list) items | awk -F'\t' -v s="${2:-}" 's=="" && $3!="Done" || $3==s {printf "#%-5s %-9s %-6s %s\n", $2, $3, $4, $5}' ;;
+  move) id=$(item_of "${2:?number}"); [ -n "$id" ] || { echo "#$2 is not on the board" >&2; exit 1; }
+    set_field "$id" Status "${3:?status}" ;;
+  watch) "$0" list "Needs me" ;;
+  _items) items ;;
+  _set) set_field "$2" "$3" "$4" ;;
+  *) sed -n '2,5p' "$0" | sed 's/^# //'; exit 1 ;;
+esac

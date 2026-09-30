@@ -1,0 +1,6 @@
+board.env
+.fields.json
+.project-id
+.pick.lock/
+work/
+AGENTS.md

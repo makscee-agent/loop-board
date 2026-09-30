@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# bin/loop    one worker: take the top Ready card for the Agent, run one timeboxed attempt, route the card, repeat.
+#   AGENT        the agent command; the prompt is its last argument (default: pi -p)
+#   ATTEMPT_MIN  the timebox in minutes (default 60)
+#   MAX_TRIES    attempts on one card before it goes to Needs me anyway (default 4)
+#   IDLE_SEC     wait between looks at an empty board (default 60)
+#   ONCE=1       stop after one attempt
+set -uo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$ROOT/board.env" 2>/dev/null || { echo "no board.env: run bin/init first" >&2; exit 1; }
+AGENT=${AGENT:-pi -p}; ATTEMPT_MIN=${ATTEMPT_MIN:-60}; MAX_TRIES=${MAX_TRIES:-4}; IDLE_SEC=${IDLE_SEC:-60}
+WORKER=${WORKER:-$(hostname -s)/$$}
+# Pi through vc: the relay extension asks this vc for your login
+[ -z "${VC_BOOTSTRAP_EXECUTABLE:-}" ] && [ -x "$HOME/.void-code/bin/vc" ] && export VC_BOOTSTRAP_EXECUTABLE=$HOME/.void-code/bin/vc
+board() { "$ROOT/bin/board" "$@"; }
+say() { echo "[$(date +%H:%M)] $*"; }
+comment() { f=$(mktemp); printf '%s\n' "$2" >"$f"; gh issue comment "$1" -R "$REPO" --body-file "$f" >/dev/null; rm -f "$f"; }
+
+wake() { # a Needs-me agent card whose last comment is yours (not a worker note) goes back to Ready
+  board _items | awk -F'\t' '$3=="Needs me" && $4=="Agent" {print $1, $2}' | while read -r id n; do
+    last=$(gh issue view "$n" -R "$REPO" --json comments,state --jq 'select(.state=="OPEN") | .comments[-1].body // ""' | head -c 20)
+    case $last in "" | "**Attempt note**"* | "**Loop**"*) ;; *) say "#$n: you answered, back to Ready"; board _set "$id" Status Ready ;; esac
+  done; }
+
+take() { # atomic on this machine: one worker at a time picks and moves
+  until mkdir "$ROOT/.pick.lock" 2>/dev/null; do sleep 1; done
+  line=$(board _items | awk -F'\t' '$3=="Ready" && $4=="Agent" {print $1"\t"$2; exit}')
+  [ -n "$line" ] && board _set "${line%%	*}" Status Working
+  rmdir "$ROOT/.pick.lock"; echo "$line"; }
+
+attempt() { # ID N
+  local id=$1 n=$2 ws=$ROOT/work/$2 wrap p out tries
+  mkdir -p "$ws"; rm -f "$ws/.outcome"
+  wrap=$(perl -e 'my @t=localtime(time+60*($ARGV[0]-5)); printf "%02d:%02d", $t[2], $t[1]' "$ATTEMPT_MIN")
+  p=$ws/.prompt
+  { cat "$ROOT/AGENTS.md"; echo; sed -e "s|{{N}}|$n|g" -e "s|{{REPO}}|$REPO|g" -e "s|{{WS}}|$ws|g" \
+      -e "s|{{WORKER}}|$WORKER|g" -e "s|{{MIN}}|$ATTEMPT_MIN|g" -e "s|{{WRAP}}|$wrap|g" "$ROOT/prompts/attempt.md"
+    echo; echo "## The task: $REPO#$n"; echo
+    gh issue view "$n" -R "$REPO" --comments; } >"$p"
+  say "#$n: attempt, until $wrap ($AGENT)"
+  (cd "$ws" && perl -e 'alarm shift; exec @ARGV' $((ATTEMPT_MIN * 60)) $AGENT "$(cat "$p")" </dev/null 2>&1 | tee -a "$ws/log")
+  out=$(sed -n 's/^OUTCOME: *//p' "$ws/.outcome" 2>/dev/null | head -1)
+  tries=$(gh issue view "$n" -R "$REPO" --json comments --jq '[.comments[] | select(.body | startswith("**Attempt note**"))] | length')
+  case $out in
+    done | needs-me) board _set "$id" Status "Needs me" ;;
+    continue) if [ "$tries" -ge "$MAX_TRIES" ]; then
+        comment "$n" "**Loop**: $tries attempts and still not done; parked in Needs me. Comment to send it back."
+        board _set "$id" Status "Needs me"
+      else board _set "$id" Status Ready; fi ;;
+    *) out=none; comment "$n" "**Loop**: the attempt ($WORKER) ended without an outcome (timebox or crash). Log: $ws/log. Comment to send it back."
+      board _set "$id" Status "Needs me" ;;
+  esac
+  say "#$n: $out"; }
+
+say "worker $WORKER on $OWNER/projects/$PROJECT ($REPO); Ctrl-C stops"
+while :; do
+  wake
+  line=$(take)
+  if [ -z "$line" ]; then sleep "$IDLE_SEC"; continue; fi
+  attempt "${line%%	*}" "${line#*	}"
+  [ "${ONCE:-}" = 1 ] && break
+done
