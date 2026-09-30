@@ -16,10 +16,22 @@ board() { "$ROOT/bin/board" "$@"; }
 say() { echo "[$(date +%H:%M)] $*"; }
 comment() { f=$(mktemp); printf '%s\n' "$2" >"$f"; gh issue comment "$1" -R "$REPO" --body-file "$f" >/dev/null; rm -f "$f"; }
 
-wake() { # a Needs-me agent card whose last comment is yours (not a worker note) goes back to Ready
+merged() { # the link of a merged PR that says "Closes REPO#N" (in case GitHub didn't close the issue itself)
+  local r; r=$(printf '%s#%s' "$REPO" "$1" | tr 'A-Z' 'a-z')
+  gh api --paginate "repos/$REPO/issues/$1/timeline" --jq '.[] | select(.event=="cross-referenced") | .source.issue
+    | select(.pull_request.merged_at != null) | select((.body // "") | ascii_downcase | contains("closes '"$r"'")) | .html_url' \
+    2>/dev/null | head -1; }
+
+wake() { # Needs-me agent cards: a closed issue or a merged PR → Done; your comment (not a worker note) → Ready
   board _items | awk -F'\t' '$3=="Needs me" && $4=="Agent" {print $1, $2}' | while read -r id n; do
-    last=$(gh issue view "$n" -R "$REPO" --json comments,state --jq 'select(.state=="OPEN") | .comments[-1].body // ""' | head -c 20)
-    case $last in "" | "**Attempt note**"* | "**Loop**"*) ;; *) say "#$n: you answered, back to Ready"; board _set "$id" Status Ready ;; esac
+    st=$(gh issue view "$n" -R "$REPO" --json state,comments --jq '.state + " " + ((.comments[-1].body // "") | .[0:20])')
+    pr=; [ "${st%% *}" = OPEN ] && pr=$(merged "$n")
+    if [ -n "$pr" ]; then gh issue close "$n" -R "$REPO" --comment "Merged in $pr" >/dev/null 2>&1; st=CLOSED; fi
+    case $st in
+      CLOSED*) say "#$n: closed, Done"; board _set "$id" Status Done ;;
+      "OPEN " | "OPEN **Attempt note**"* | "OPEN **Loop**"*) ;;
+      *) say "#$n: you answered, back to Ready"; board _set "$id" Status Ready ;;
+    esac
   done; }
 
 take() { # atomic on this machine: one worker at a time picks and moves

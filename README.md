@@ -21,7 +21,7 @@ Planned → Ready → Working → Needs me → Done          Executor: Agent | M
   - `continue` (progress, not finished) → back to **Ready** for a fresh attempt (at most `MAX_TRIES`, then Needs me)
   - no outcome (timebox ran out, crash) → **Needs me** with a comment
 - **You** comment on a Needs-me card to answer; the loop sends it back to Ready on its next round. Merge the PR
-  (`Closes <repo>#N`) and the issue closes; the board's built-in workflow moves it to Done.
+  (its body says `Closes <repo>#N`) and the loop closes the issue, if GitHub hasn't, and moves the card to Done.
 - The thread is the memory: every attempt starts fresh and reads the earlier notes. Nothing lives only in a terminal.
 
 ## Setup (10 minutes)
