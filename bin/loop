@@ -23,8 +23,7 @@ merged() { # the link of a merged PR that says "Closes REPO#N" (in case GitHub d
     2>/dev/null | head -1; }
 
 wake() { # Needs-me agent cards: a closed issue or a merged PR → Done; your comment (not a worker note) → Ready
-  board _items | awk -F'\t' '$3=="Needs me" && $4=="Agent" {print $1, $2}' | while read -r id n; do
-    st=$(gh issue view "$n" -R "$REPO" --json state,comments --jq '.state + " " + ((.comments[-1].body // "") | .[0:20])')
+  board _items | awk -F'\t' '$3=="Needs me" && $4=="Agent" {print $1"\t"$2"\t"$6" "$7}' | while IFS=$'\t' read -r id n st; do
     pr=; [ "${st%% *}" = OPEN ] && pr=$(merged "$n")
     if [ -n "$pr" ]; then gh issue close "$n" -R "$REPO" --comment "Merged in $pr" >/dev/null 2>&1; st=CLOSED; fi
     case $st in
